@@ -81,6 +81,7 @@ class OpenSwiftIME : InputMethodService() {
     private var activeAppConfig = PerAppSettings.AppConfig("")
     private var voiceRecognizer: VoiceRecognizer? = null
     private var isListeningVoice = false
+    private var lastAppliedKeyHeightDp = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -93,6 +94,12 @@ class OpenSwiftIME : InputMethodService() {
             predictor.frequency(language, word)
         }
         refreshLanguageState()
+        Thread {
+            runCatching { predictor.preloadAll() }
+        }.apply {
+            isDaemon = true
+            start()
+        }
         snippets = SnippetManager(this)
         perAppSettings = PerAppSettings(this)
         vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
@@ -803,22 +810,26 @@ class OpenSwiftIME : InputMethodService() {
             glideEnabled = !privacyModeActive && effective.glideEnabled,
             keyHeightDp = effective.keyHeightDp,
         )
-        if (::clipboardView.isInitialized) {
-            clipboardView.keyHeightDp = effective.keyHeightDp
+        val heightChanged = lastAppliedKeyHeightDp != effective.keyHeightDp
+        lastAppliedKeyHeightDp = effective.keyHeightDp
+        if (heightChanged) {
+            if (::clipboardView.isInitialized) {
+                clipboardView.keyHeightDp = effective.keyHeightDp
+            }
+            if (::textEditingView.isInitialized) {
+                textEditingView.keyHeightDp = effective.keyHeightDp
+            }
+            if (::toolsHubView.isInitialized) {
+                toolsHubView.keyHeightDp = effective.keyHeightDp
+            }
+            if (::keyboardInputView.isInitialized) {
+                keyboardInputView.requestLayout()
+            }
+            window?.window?.decorView?.requestLayout()
+            try {
+                updateInputViewShown()
+            } catch (_: Exception) {}
         }
-        if (::textEditingView.isInitialized) {
-            textEditingView.keyHeightDp = effective.keyHeightDp
-        }
-        if (::toolsHubView.isInitialized) {
-            toolsHubView.keyHeightDp = effective.keyHeightDp
-        }
-        if (::keyboardInputView.isInitialized) {
-            keyboardInputView.requestLayout()
-        }
-        window?.window?.decorView?.requestLayout()
-        try {
-            updateInputViewShown()
-        } catch (_: Exception) {}
     }
 
     companion object {

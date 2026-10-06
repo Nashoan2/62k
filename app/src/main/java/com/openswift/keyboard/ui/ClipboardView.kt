@@ -42,6 +42,7 @@ class ClipboardView @JvmOverloads constructor(
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(ctx).scaledTouchSlop
     private val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    private val settings = com.openswift.keyboard.data.Settings(ctx)
 
     var isDeleteMode = false
         set(value) {
@@ -498,7 +499,7 @@ class ClipboardView @JvmOverloads constructor(
 
     private fun vibrateFeedback() {
         try {
-            if (!com.openswift.keyboard.data.Settings(context).hapticFeedback) return
+            if (!settings.hapticFeedback) return
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 vibrator?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {

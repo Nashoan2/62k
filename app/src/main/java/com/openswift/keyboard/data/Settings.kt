@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.util.concurrent.ConcurrentHashMap
 
 internal interface SettingsStore {
     fun getString(key: String, defaultValue: String): String
@@ -16,29 +17,73 @@ internal interface SettingsStore {
 }
 
 private class SharedPreferencesSettingsStore(private val prefs: SharedPreferences) : SettingsStore {
-    override fun getString(key: String, defaultValue: String): String =
-        prefs.getString(key, defaultValue) ?: defaultValue
+    private val cache = ConcurrentHashMap<String, Any>()
+
+    private val changeListener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPrefs, key ->
+        if (key != null) {
+            val updated = sharedPrefs.all[key]
+            if (updated != null) {
+                cache[key] = updated
+            } else {
+                cache.remove(key)
+            }
+        }
+    }
+
+    init {
+        runCatching {
+            prefs.all.forEach { (k, v) ->
+                if (v != null) cache[k] = v
+            }
+            prefs.registerOnSharedPreferenceChangeListener(changeListener)
+        }
+    }
+
+    override fun getString(key: String, defaultValue: String): String {
+        val cached = cache[key] as? String
+        if (cached != null) return cached
+        val loaded = prefs.getString(key, defaultValue) ?: defaultValue
+        cache[key] = loaded
+        return loaded
+    }
 
     override fun putString(key: String, value: String) {
+        cache[key] = value
         prefs.edit().putString(key, value).apply()
     }
 
     override fun putStrings(values: Map<String, String>) {
         val editor = prefs.edit()
-        values.forEach { (key, value) -> editor.putString(key, value) }
+        values.forEach { (key, value) ->
+            cache[key] = value
+            editor.putString(key, value)
+        }
         editor.apply()
     }
 
-    override fun getBoolean(key: String, defaultValue: Boolean): Boolean =
-        prefs.getBoolean(key, defaultValue)
+    override fun getBoolean(key: String, defaultValue: Boolean): Boolean {
+        val cached = cache[key] as? Boolean
+        if (cached != null) return cached
+        val loaded = prefs.getBoolean(key, defaultValue)
+        cache[key] = loaded
+        return loaded
+    }
 
     override fun putBoolean(key: String, value: Boolean) {
+        cache[key] = value
         prefs.edit().putBoolean(key, value).apply()
     }
 
-    override fun getInt(key: String, defaultValue: Int): Int = prefs.getInt(key, defaultValue)
+    override fun getInt(key: String, defaultValue: Int): Int {
+        val cached = cache[key] as? Int
+        if (cached != null) return cached
+        val loaded = prefs.getInt(key, defaultValue)
+        cache[key] = loaded
+        return loaded
+    }
 
     override fun putInt(key: String, value: Int) {
+        cache[key] = value
         prefs.edit().putInt(key, value).apply()
     }
 }
@@ -73,7 +118,7 @@ internal class MutableMapSettingsStore(
 
 class Settings internal constructor(private val store: SettingsStore) {
 
-    constructor(ctx: Context) : this(SharedPreferencesSettingsStore(encryptedPreferences(ctx)))
+    constructor(ctx: Context) : this(sharedStore(ctx))
 
     var theme: String
         get() = store.getString("theme", "amoled")
@@ -151,6 +196,18 @@ class Settings internal constructor(private val store: SettingsStore) {
         set(value) = store.putBoolean("reduced_motion", value)
 
     companion object {
+        @Volatile
+        private var cachedStore: SettingsStore? = null
+
+        private fun sharedStore(ctx: Context): SettingsStore {
+            cachedStore?.let { return it }
+            return synchronized(this) {
+                cachedStore ?: SharedPreferencesSettingsStore(encryptedPreferences(ctx.applicationContext ?: ctx)).also {
+                    cachedStore = it
+                }
+            }
+        }
+
         private fun encryptedPreferences(ctx: Context): SharedPreferences =
             EncryptedSharedPreferences.create(
                 ctx,

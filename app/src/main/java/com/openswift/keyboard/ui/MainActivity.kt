@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -156,7 +157,7 @@ class MainActivity : AppCompatActivity() {
         val initialPerAppPackage = intent.getStringExtra(EXTRA_PER_APP_PACKAGE).orEmpty()
         val openSettings = intent.getBooleanExtra(EXTRA_OPEN_SETTINGS, false)
         setContent {
-            val settings = Settings(this@MainActivity)
+            val settings = remember { Settings(this@MainActivity) }
             MainUI(
                 settings = settings,
                 context = this@MainActivity,
@@ -393,8 +394,11 @@ fun MainUI(
     val themeEditor = remember(context) { ThemeEditor(context) }
     val availableThemes = remember(themeEditor) { themeEditor.listThemes() }
     val customLayouts = remember(context) { CustomLayoutStore(context).list() }
+    val clipboardHistory = remember(context) { ClipboardHistory(context) }
+    var activeThemeId by remember { mutableStateOf(settings.theme) }
+    val userDictionary = remember(context, settings.language) { UserDictionary(context, settings.language) }
     
-    val theme = themeEditor.resolve(settings.theme)
+    val theme = remember(themeEditor, activeThemeId) { themeEditor.resolve(activeThemeId) }
     val bgColor = Color(theme.background)
     val keyBgColor = Color(theme.keyBackground)
     val textColor = Color(theme.keyText)
@@ -438,10 +442,11 @@ fun MainUI(
                         initialPerAppPackage,
                         availableThemes,
                         customLayouts.map { it.id to it.name },
+                        onThemeChanged = { activeThemeId = it },
                     )
                     2 -> PrivacyUI(
-                        ClipboardHistory(context),
-                        UserDictionary(context, settings.language),
+                        clipboardHistory,
+                        userDictionary,
                         bgColor,
                         textColor,
                         accentColor
@@ -515,6 +520,7 @@ fun EnhancedSettingsUI(
     initialPerAppPackage: String = "",
     availableThemes: List<KbTheme>,
     customLayoutOptions: List<Pair<String, String>>,
+    onThemeChanged: (String) -> Unit = {},
 ) {
     var selectedThemeId by remember { mutableStateOf(settings.theme) }
     Column(
@@ -543,6 +549,7 @@ fun EnhancedSettingsUI(
                 onThemeChange = {
                     settings.theme = it
                     selectedThemeId = it
+                    onThemeChanged(it)
                 },
                 themes = availableThemes,
                 bgColor = bgColor,
@@ -979,31 +986,36 @@ fun SettingsList(
         if (options.isNotEmpty()) {
             Text(label, color = textColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             options.forEach { (id, name) ->
+                val isSelected = when (label) {
+                    "Language", "اللغة" -> selectedLanguage == id
+                    "Layout", "التخطيط" -> selectedLayout == id
+                    else -> false
+                }
+                val selectOption = {
+                    when (label) {
+                        "Language", "اللغة" -> {
+                            settings.language = id
+                            selectedLanguage = settings.language
+                            selectedLayout = settings.layout
+                        }
+                        "Layout", "التخطيط" -> {
+                            settings.layout = id
+                            selectedLayout = id
+                        }
+                    }
+                }
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = selectOption)
+                        .padding(vertical = 2.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(name, color = textColor)
                     RadioButton(
-                        selected = when (label) {
-                            "Language", "اللغة" -> selectedLanguage == id
-                            "Layout", "التخطيط" -> selectedLayout == id
-                            else -> false
-                        },
-                        onClick = {
-                            when (label) {
-                                "Language", "اللغة" -> {
-                                    settings.language = id
-                                    selectedLanguage = settings.language
-                                    selectedLayout = settings.layout
-                                }
-                                "Layout", "التخطيط" -> {
-                                    settings.layout = id
-                                    selectedLayout = id
-                                }
-                            }
-                        },
+                        selected = isSelected,
+                        onClick = selectOption,
                         colors = RadioButtonDefaults.colors(selectedColor = accentColor)
                     )
                 }
@@ -1019,9 +1031,15 @@ fun ToggleOption(
     textColor: Color,
     onToggle: (Boolean) -> Unit,
 ) {
+    var checked by remember(label) { mutableStateOf(value) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable {
+                val next = !checked
+                checked = next
+                onToggle(next)
+            }
             .padding(vertical = Spacing.sm),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1033,8 +1051,11 @@ fun ToggleOption(
             modifier = Modifier.weight(1f)
         )
         Switch(
-            checked = value,
-            onCheckedChange = onToggle,
+            checked = checked,
+            onCheckedChange = {
+                checked = it
+                onToggle(it)
+            },
             modifier = Modifier.scale(0.95f)
         )
     }

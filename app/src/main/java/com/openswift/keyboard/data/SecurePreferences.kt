@@ -8,11 +8,24 @@ import androidx.security.crypto.MasterKey
 /** Opens encrypted preference stores and migrates matching legacy plaintext entries once. */
 object SecurePreferences {
     private const val SECURE_PREFIX = "openswift_secure_"
+    private val openedStores = java.util.concurrent.ConcurrentHashMap<String, SharedPreferences>()
+    @Volatile
+    private var cachedMasterKey: MasterKey? = null
 
     internal data class MigrationPlan(
         val entriesToWrite: Map<String, Any>,
         val legacyKeysToRemove: Set<String>
     )
+
+    private fun masterKey(appContext: Context): MasterKey {
+        cachedMasterKey?.let { return it }
+        return synchronized(this) {
+            cachedMasterKey ?: MasterKey.Builder(appContext)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+                .also { cachedMasterKey = it }
+        }
+    }
 
     fun open(
         context: Context,
@@ -23,19 +36,21 @@ object SecurePreferences {
         ),
         migrateKey: (String) -> Boolean = { true }
     ): SharedPreferences {
-        val appContext = context.applicationContext
-        val masterKey = MasterKey.Builder(appContext)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        val encrypted = EncryptedSharedPreferences.create(
-            appContext,
-            SECURE_PREFIX + storeName,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        migrateLegacy(legacyPreferences, encrypted, migrateKey)
-        return encrypted
+        openedStores[storeName]?.let { return it }
+        val appContext = context.applicationContext ?: context
+        return synchronized(this) {
+            openedStores[storeName]?.let { return@synchronized it }
+            val encrypted = EncryptedSharedPreferences.create(
+                appContext,
+                SECURE_PREFIX + storeName,
+                masterKey(appContext),
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+            migrateLegacy(legacyPreferences, encrypted, migrateKey)
+            openedStores[storeName] = encrypted
+            encrypted
+        }
     }
 
     fun clear(

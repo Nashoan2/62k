@@ -13,18 +13,23 @@ class ClipboardHistory(ctx: Context) {
     // Tracks when each text was deleted so old clips sitting in the system clipboard don't resurrect,
     // but any fresh copy of the same text is immediately allowed and captured!
     private val deletedTimestamps = mutableMapOf<String, Long>()
+    private var cachedItems: List<String>? = null
+    private var cachedPinnedItems: List<String>? = null
 
     fun items(): List<String> {
+        cachedItems?.let { return it }
         val raw = prefs.getString("items", null)
         if (raw == null) {
             val initialRecent = listOf("pkg update", "68245345")
             save(initialRecent)
             return initialRecent
         }
-        return runCatching {
+        val parsed = runCatching {
             val arr = JSONArray(raw)
             List(arr.length()) { arr.getString(it) }
         }.getOrDefault(emptyList())
+        cachedItems = parsed
+        return parsed
     }
 
     fun add(text: String): Boolean {
@@ -85,6 +90,7 @@ class ClipboardHistory(ctx: Context) {
     }
 
     fun pinnedItems(): List<String> {
+        cachedPinnedItems?.let { return it }
         val raw = prefs.getString("pinned_items", null)
         if (raw == null) {
             val defaultPinned = listOf(
@@ -95,10 +101,12 @@ class ClipboardHistory(ctx: Context) {
             savePinned(defaultPinned)
             return defaultPinned
         }
-        return runCatching {
+        val parsed = runCatching {
             val arr = JSONArray(raw)
             List(arr.length()) { arr.getString(it) }
         }.getOrDefault(emptyList())
+        cachedPinnedItems = parsed
+        return parsed
     }
 
     fun removePinned(text: String) {
@@ -120,15 +128,17 @@ class ClipboardHistory(ctx: Context) {
     }
 
     private fun savePinned(list: List<String>) {
+        cachedPinnedItems = list
         val arr = JSONArray()
         list.forEach { arr.put(it) }
-        prefs.edit().putString("pinned_items", arr.toString()).commit()
+        prefs.edit().putString("pinned_items", arr.toString()).apply()
     }
 
     private fun save(list: List<String>) {
+        cachedItems = list
         val arr = JSONArray()
         list.forEach { arr.put(it) }
-        prefs.edit().putString("items", arr.toString()).commit()
+        prefs.edit().putString("items", arr.toString()).apply()
     }
 
     fun captureSystem(ctx: Context, enabled: Boolean, privateField: Boolean): Boolean {

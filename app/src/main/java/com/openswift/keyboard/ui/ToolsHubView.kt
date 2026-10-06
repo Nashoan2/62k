@@ -129,6 +129,12 @@ class ToolsHubView @JvmOverloads constructor(
     // Hit test bounds
     private val toolbarBounds = mutableMapOf<String, RectF>()
     private val toolBounds = mutableMapOf<ToolId, RectF>()
+    private var pressedToolId: ToolId? = null
+    private var pressedToolbarId: String? = null
+    private val pillPressedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = colorHighlightBg
+        style = Paint.Style.FILL
+    }
 
     // Dimensions
     private val toolbarHeight = 44f * density
@@ -258,7 +264,8 @@ class ToolsHubView @JvmOverloads constructor(
 
     private fun drawPill(canvas: Canvas, rect: RectF, item: PillItem) {
         val radius = rect.height() / 2f
-        canvas.drawRoundRect(rect, radius, radius, pillBgPaint)
+        val bg = if (pressedToolId == item.id) pillPressedPaint else pillBgPaint
+        canvas.drawRoundRect(rect, radius, radius, bg)
 
         val centerY = rect.centerY()
         val iconSize = (19f * density).toInt()
@@ -317,12 +324,39 @@ class ToolsHubView @JvmOverloads constructor(
         canvas.drawCircle(dotsCenterX + dotRadius + (dotGap / 2f), dotsCenterY, dotRadius, bottomDotPaint)
     }
 
+    private fun findToolbarAt(x: Float, y: Float): String? {
+        for ((id, rect) in toolbarBounds) {
+            if (rect.contains(x, y)) return id
+        }
+        return null
+    }
+
+    private fun findToolAt(x: Float, y: Float): ToolId? {
+        for ((id, rect) in toolBounds) {
+            if (rect.contains(x, y)) return id
+        }
+        return null
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action == MotionEvent.ACTION_UP) {
-            // Check Toolbar clicks
-            for ((id, rect) in toolbarBounds) {
-                if (rect.contains(event.x, event.y)) {
-                    when (id) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val tool = findToolAt(event.x, event.y)
+                pressedToolId = tool
+                pressedToolbarId = if (tool == null) findToolbarAt(event.x, event.y) else null
+                invalidate()
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val downTool = pressedToolId
+                val downToolbar = pressedToolbarId
+                pressedToolId = null
+                pressedToolbarId = null
+                invalidate()
+
+                val toolbarId = findToolbarAt(event.x, event.y) ?: downToolbar
+                if (toolbarId != null) {
+                    when (toolbarId) {
                         "emoji" -> onOpenEmoji?.invoke()
                         "voice" -> onOpenVoice?.invoke()
                         "cursor" -> onOpenTextEditing?.invoke()
@@ -331,17 +365,22 @@ class ToolsHubView @JvmOverloads constructor(
                     }
                     return true
                 }
-            }
 
-            // Check Tool clicks
-            for ((id, rect) in toolBounds) {
-                if (rect.contains(event.x, event.y)) {
-                    when (id) {
+                val toolId = findToolAt(event.x, event.y) ?: downTool
+                if (toolId != null) {
+                    when (toolId) {
                         ToolId.EMOJI -> onOpenEmoji?.invoke()
-                        else -> onToolSelected?.invoke(id)
+                        else -> onToolSelected?.invoke(toolId)
                     }
                     return true
                 }
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pressedToolId = null
+                pressedToolbarId = null
+                invalidate()
+                return true
             }
         }
         return true

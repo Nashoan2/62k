@@ -124,6 +124,12 @@ class KeyboardView(
     }
     private val keyModifierBgPaint = Paint().apply { color = theme.keyModifierBackground }
     private val keyBgPaint = Paint().apply { color = theme.keyBackground }
+    private val keyPressedBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = theme.keyAccent
+        alpha = 90
+    }
+    private val typefaceNormal = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+    private val typefaceBold = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
     private val shiftHighlightPaint = Paint().apply {
         color = theme.keyAccent
         style = Paint.Style.STROKE
@@ -196,10 +202,14 @@ class KeyboardView(
     }
 
     private var longPressTriggered = false
+    private var deleteRepeatFired = false
+    private var pressedKey: Key? = null
+    private var pressedToolbarAction: String? = null
     private var touchDownX = 0f
     private var touchDownY = 0f
     private val longPressHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var longPressRunnable: Runnable? = null
+    private var deleteRepeatRunnable: Runnable? = null
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec)
@@ -371,6 +381,9 @@ class KeyboardView(
                             (y + suggestionHeightPx).toInt()
                         )
                         toolbarBounds[action] = hitRect
+                        if (pressedToolbarAction == action) {
+                            canvas.drawCircle(centerX, (iconTop + iconSize / 2f), iconSize * 0.9f, keyPressedBgPaint)
+                        }
                         if (action == "voice" && isVoiceListening) {
                             val activeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                                 color = 0x33EF4444.toInt()
@@ -379,7 +392,7 @@ class KeyboardView(
                             canvas.drawCircle(centerX, (iconTop + iconSize / 2f), iconSize * 0.85f, activeBgPaint)
                             drawable.setTint(0xFFEF4444.toInt())
                         } else {
-                            drawable.setTint(theme.suggestionText)
+                            drawable.setTint(if (pressedToolbarAction == action) theme.keyAccent else theme.suggestionText)
                         }
                         drawable.setBounds(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize)
                         drawable.draw(canvas)
@@ -414,6 +427,7 @@ class KeyboardView(
                     )
                     keyBounds[key] = rect
 
+                    val isKeyPressed = (pressedKey == key)
                     val bgColor = if (key.isModifier) theme.keyModifierBackground else theme.keyBackground
                     val bgPaint = if (key.isModifier) keyModifierBgPaint else keyBgPaint
                     bgPaint.color = bgColor
@@ -423,6 +437,13 @@ class KeyboardView(
                         keyCornerRadius, keyCornerRadius,
                         bgPaint
                     )
+                    if (isKeyPressed) {
+                        canvas.drawRoundRect(
+                            x2 + keyPadding, y + keyPadding, x2 + kw.toFloat() - keyPadding, y + keyHeightPx - keyPadding,
+                            keyCornerRadius, keyCornerRadius,
+                            keyPressedBgPaint
+                        )
+                    }
                     
                     // Subtle modern top highlight for clean key separation
                     canvas.drawRoundRect(
@@ -431,7 +452,7 @@ class KeyboardView(
                         keyBorderPaint
                     )
                     
-                    if (shiftActive && key.code == KC.SHIFT) {
+                    if ((shiftActive && key.code == KC.SHIFT) || isKeyPressed) {
                         canvas.drawRoundRect(
                             x2 + keyPadding, y + keyPadding, x2 + kw.toFloat() - keyPadding, y + keyHeightPx - keyPadding,
                             keyCornerRadius, keyCornerRadius,
@@ -490,11 +511,7 @@ class KeyboardView(
                         val isBoldKey = isCyanKey || displayLabel == "123" || key.label == "123" || key.code in listOf(KC.ABC, KC.SYMBOLS, KC.SHIFT_SYMBOLS) || displayLabel == "ABC"
 
                         textPaint.color = if (isCyanKey) theme.keyAccent else theme.keyText
-                        textPaint.typeface = if (isBoldKey) {
-                            android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
-                        } else {
-                            android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
-                        }
+                        textPaint.typeface = if (isBoldKey) typefaceBold else typefaceNormal
 
                         val rawHint = key.popup.firstOrNull()
                         val isHiddenHint = rawHint != null && (rawHint in HIDDEN_HINT_TEXTS || rawHint.lowercase() in HIDDEN_HINT_TEXTS)
@@ -517,7 +534,7 @@ class KeyboardView(
                             canvas.drawText(displayLabel, textX, mainY, textPaint)
                         }
                         textPaint.color = theme.keyText
-                        textPaint.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+                        textPaint.typeface = typefaceNormal
                     }
                     textPaint.textSize = defaultTextSize
 
@@ -527,24 +544,32 @@ class KeyboardView(
             }
         }
 
-        // Draw glide trail with fade gradient (skip if reduced motion enabled)
-        if (!settings.reducedMotion && glideTrail.isNotEmpty()) {
-            val now = System.currentTimeMillis()
-            for (i in 0 until glideTrail.size - 1) {
-                val p1 = glideTrail[i]
-                val p2 = glideTrail[i + 1]
-                val age = (now - p1.time).toFloat().coerceAtLeast(0f)
-                val progress = (age / trailFadeMs).coerceIn(0f, 1f)
-                val alpha = ((1f - progress) * 255).toInt()
-                trailPaint.color = theme.gestureTrail
-                trailPaint.alpha = alpha
-                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, trailPaint)
+        val reducedMotion = settings.reducedMotion
+        val now = System.currentTimeMillis()
+
+        // Draw glide trail with fade gradient and prune expired points
+        if (!reducedMotion && glideTrail.isNotEmpty()) {
+            glideTrail.removeAll { now - it.time >= trailFadeMs }
+            if (glideTrail.size >= 2) {
+                for (i in 0 until glideTrail.size - 1) {
+                    val p1 = glideTrail[i]
+                    val p2 = glideTrail[i + 1]
+                    val age = (now - p1.time).toFloat().coerceAtLeast(0f)
+                    val progress = (age / trailFadeMs).coerceIn(0f, 1f)
+                    val alpha = ((1f - progress) * 255).toInt()
+                    trailPaint.color = theme.gestureTrail
+                    trailPaint.alpha = alpha
+                    canvas.drawLine(p1.x, p1.y, p2.x, p2.y, trailPaint)
+                }
+            } else if (!isGliding) {
+                glideTrail.clear()
             }
+        } else {
+            glideTrail.clear()
         }
 
         // Draw ripples (skip if reduced motion enabled)
-        if (!settings.reducedMotion) {
-            val now = System.currentTimeMillis()
+        if (!reducedMotion && ripples.isNotEmpty()) {
             val expiredIndices = mutableListOf<Int>()
             for ((idx, ripple) in ripples.withIndex()) {
                 val elapsed = now - ripple.startTime
@@ -578,6 +603,45 @@ class KeyboardView(
         }
     }
 
+    private fun cancelPendingTimers() {
+        longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+        longPressRunnable = null
+        deleteRepeatRunnable?.let { longPressHandler.removeCallbacks(it) }
+        deleteRepeatRunnable = null
+    }
+
+    private fun isInstantActionKey(key: Key): Boolean =
+        key.code == KC.DELETE ||
+            key.code == KC.SHIFT ||
+            key.code == KC.SYMBOLS ||
+            key.code == KC.ABC ||
+            key.code == KC.SHIFT_SYMBOLS ||
+            key.code == KC.LANGUAGE ||
+            key.code == KC.SPACE ||
+            key.code == KC.ENTER
+
+    private fun canStartGlideOn(key: Key?): Boolean =
+        glideEnabled &&
+            effectiveLayout.id != "numpad" &&
+            !effectiveLayout.id.startsWith("symbols") &&
+            key != null &&
+            !key.isModifier &&
+            key.code > 0 &&
+            key.label != "لا"
+
+    private fun dispatchToolbarAction(action: String) {
+        when (action) {
+            "hub" -> onOpenHub?.invoke() ?: onKeyListener?.invoke(KC.SETTINGS, "Settings")
+            "emoji" -> onKeyListener?.invoke(KC.EMOJI, "Emoji")
+            "voice" -> onOpenVoice?.invoke() ?: onKeyListener?.invoke(KC.MIC, "Voice")
+            "language" -> onKeyListener?.invoke(KC.LANGUAGE, "Language")
+            "clipboard" -> onOpenClipboard?.invoke() ?: onKeyListener?.invoke(KC.CLIPBOARD, "Clipboard")
+            "audio_wave", "mic" -> onOpenVoice?.invoke() ?: onOpenHub?.invoke()
+            "cursor" -> onOpenTextEditing?.invoke() ?: onKeyListener?.invoke(KC.SETTINGS, "Settings")
+            "hide" -> onHideKeyboard?.invoke()
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (isLamAlefPopupVisible) {
             handleLamAlefPopupTouch(event)
@@ -585,8 +649,9 @@ class KeyboardView(
         }
 
         val density = resources.displayMetrics.density
-        when (event.action) {
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                cancelPendingTimers()
                 glideStartTime = System.currentTimeMillis()
                 isGliding = false
                 glideSamples.clear()
@@ -594,13 +659,34 @@ class KeyboardView(
                 touchDownX = event.x
                 touchDownY = event.y
                 longPressTriggered = false
+                deleteRepeatFired = false
 
-                val pressedKey = findKeyAt(event.x, event.y)
-                if (pressedKey != null && pressedKey.label == "لا") {
+                val downKey = findKeyAt(event.x, event.y)
+                pressedKey = downKey
+                pressedToolbarAction = if (downKey == null) findToolbarAt(event.x, event.y) else null
+                invalidate()
+
+                if (downKey != null && isInstantActionKey(downKey)) {
+                    deleteRepeatFired = true
+                    onKeyListener?.invoke(downKey.code, downKey.label)
+                    if (downKey.code == KC.DELETE) {
+                        val repeatTask = object : Runnable {
+                            override fun run() {
+                                if (pressedKey?.code == KC.DELETE) {
+                                    onKeyListener?.invoke(KC.DELETE, downKey.label)
+                                    longPressHandler.postDelayed(this, 50L)
+                                }
+                            }
+                        }
+                        deleteRepeatRunnable = repeatTask
+                        longPressHandler.postDelayed(repeatTask, 300L)
+                    }
+                } else if (downKey != null && downKey.label == "لا") {
                     longPressRunnable = Runnable {
                         longPressTriggered = true
                         isGliding = false
                         glideSamples.clear()
+                        pressedKey = null
                         isLamAlefPopupVisible = true
                         invalidate()
                         try {
@@ -609,14 +695,16 @@ class KeyboardView(
                             }
                         } catch (_: Exception) {}
                     }
-                    longPressHandler.postDelayed(longPressRunnable!!, 320L)
-                } else if (pressedKey != null && pressedKey.popup.isNotEmpty() && !pressedKey.isModifier) {
-                    val popupTarget = pressedKey.popup.firstOrNull()
+                    longPressHandler.postDelayed(longPressRunnable!!, 260L)
+                } else if (downKey != null && downKey.popup.isNotEmpty() && !downKey.isModifier) {
+                    val popupTarget = downKey.popup.firstOrNull()
                     if (popupTarget != null && popupTarget.isNotEmpty() && popupTarget !in HIDDEN_HINT_TEXTS && popupTarget.lowercase() !in HIDDEN_HINT_TEXTS) {
                         longPressRunnable = Runnable {
                             longPressTriggered = true
                             isGliding = false
                             glideSamples.clear()
+                            pressedKey = null
+                            invalidate()
                             onKeyListener?.invoke(popupTarget.first().code, popupTarget)
                             try {
                                 if (settings.hapticFeedback) {
@@ -624,48 +712,108 @@ class KeyboardView(
                                 }
                             } catch (_: Exception) {}
                         }
-                        longPressHandler.postDelayed(longPressRunnable!!, 380L)
+                        longPressHandler.postDelayed(longPressRunnable!!, 320L)
                     }
                 }
-                
-                // Add ripple on tap (cap to maxRipples to prevent memory bloat)
-                if (ripples.size < maxRipples) {
+
+                if (!settings.reducedMotion && ripples.size < maxRipples) {
                     ripples.add(Ripple(event.x, event.y, glideStartTime))
                     postInvalidateOnAnimation()
                 }
-                
-                val sample = sampleAt(event.x, event.y)
-                if (sample.char != ' ') glideSamples.add(sample)
+
+                if (canStartGlideOn(downKey)) {
+                    val sample = sampleForKey(downKey!!, event.x, event.y)
+                    if (sample.char != ' ') glideSamples.add(sample)
+                }
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // Multi-touch fast typing: commit the previous finger's pending key immediately!
+                val prevKey = pressedKey
+                cancelPendingTimers()
+                if (prevKey != null && !deleteRepeatFired && !longPressTriggered && !isGliding) {
+                    if (prevKey.label == "لا") {
+                        isLamAlefPopupVisible = true
+                        pressedKey = null
+                        invalidate()
+                        return true
+                    } else {
+                        onKeyListener?.invoke(prevKey.code, prevKey.label)
+                    }
+                }
+                val idx = event.actionIndex
+                val px = event.getX(idx)
+                val py = event.getY(idx)
+                touchDownX = px
+                touchDownY = py
+                isGliding = false
+                glideSamples.clear()
+                longPressTriggered = false
+                deleteRepeatFired = false
+                val newKey = findKeyAt(px, py)
+                pressedKey = newKey
+                pressedToolbarAction = if (newKey == null) findToolbarAt(px, py) else null
+                if (newKey != null && isInstantActionKey(newKey)) {
+                    deleteRepeatFired = true
+                    onKeyListener?.invoke(newKey.code, newKey.label)
+                }
+                invalidate()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 val dx = kotlin.math.abs(event.x - touchDownX)
                 val dy = kotlin.math.abs(event.y - touchDownY)
-                if (dx > 14f * density || dy > 14f * density) {
+                if (dx > 16f * density || dy > 16f * density) {
                     longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+                    longPressRunnable = null
                 }
 
-                val elapsed = System.currentTimeMillis() - glideStartTime
-                if (!isGliding && elapsed > 80L && glideEnabled) {
-                    isGliding = true
-                }
-                if (isGliding) {
-                    val sample = sampleAt(event.x, event.y)
-                    if (sample.char != ' ' && (glideSamples.isEmpty() || sample.char != glideSamples.last().char)) {
-                        glideSamples.add(sample)
+                if (canStartGlideOn(pressedKey) && !deleteRepeatFired && !longPressTriggered) {
+                    val currentKey = findKeyAt(event.x, event.y)
+                    if (!isGliding) {
+                        val moveDist = kotlin.math.hypot(dx.toDouble(), dy.toDouble())
+                        if (moveDist > 26.0 * density && currentKey != null && currentKey != pressedKey && !currentKey.isModifier && currentKey.code > 0) {
+                            isGliding = true
+                            longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+                            longPressRunnable = null
+                        }
                     }
-                    // Append trail point for gradient fade
-                    glideTrail.add(TrailPoint(event.x, event.y, System.currentTimeMillis()))
-                    postInvalidateOnAnimation()
+                    if (isGliding) {
+                        if (currentKey != null && !currentKey.isModifier && currentKey.code > 0) {
+                            val sample = sampleForKey(currentKey, event.x, event.y)
+                            if (sample.char != ' ' && (glideSamples.isEmpty() || sample.char != glideSamples.last().char)) {
+                                glideSamples.add(sample)
+                            }
+                        }
+                        if (!settings.reducedMotion) {
+                            glideTrail.add(TrailPoint(event.x, event.y, System.currentTimeMillis()))
+                            postInvalidateOnAnimation()
+                        }
+                    }
+                } else if (!deleteRepeatFired) {
+                    val hoveredKey = findKeyAt(event.x, event.y)
+                    if (hoveredKey != null && hoveredKey != pressedKey && !isInstantActionKey(hoveredKey)) {
+                        pressedKey = hoveredKey
+                        invalidate()
+                    }
                 }
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
-                if (longPressTriggered) {
+                val downKey = pressedKey
+                val downToolbar = pressedToolbarAction
+                val wasInstantFired = deleteRepeatFired
+                val wasLongPress = longPressTriggered
+                cancelPendingTimers()
+                pressedKey = null
+                pressedToolbarAction = null
+                deleteRepeatFired = false
+                longPressTriggered = false
+
+                if (wasLongPress || wasInstantFired) {
                     isGliding = false
                     glideSamples.clear()
-                    postInvalidateOnAnimation()
+                    invalidate()
                     return true
                 }
 
@@ -699,10 +847,11 @@ class KeyboardView(
                     val decoded = glideDecoder.decode(glideSamples)
                     if (decoded.isNotEmpty()) {
                         onGlideListener?.invoke(decoded.first())
+                    } else if (downKey != null) {
+                        onKeyListener?.invoke(downKey.code, downKey.label)
                     }
-                } else if (!isGliding && glideSamples.isNotEmpty()) {
-                    // Tap on a single key
-                    val key = findKeyAt(event.x, event.y)
+                } else {
+                    val key = findKeyAt(event.x, event.y) ?: downKey
                     if (key != null) {
                         if (key.label == "لا") {
                             isLamAlefPopupVisible = true
@@ -710,66 +859,98 @@ class KeyboardView(
                             return true
                         }
                         onKeyListener?.invoke(key.code, key.label)
-                    }
-                } else if (!isGliding && predictionEnabled) {
-                    // Check if suggestion was tapped
-                    var handled = false
-                    for ((sugg, rect) in suggestionBounds) {
-                        if (rect.contains(event.x.toInt(), event.y.toInt())) {
-                            onGlideListener?.invoke(sugg)
-                            handled = true
-                            break
-                        }
-                    }
-                    if (!handled) {
-                        for ((action, rect) in toolbarBounds) {
+                    } else if (predictionEnabled) {
+                        var handled = false
+                        for ((sugg, rect) in suggestionBounds) {
                             if (rect.contains(event.x.toInt(), event.y.toInt())) {
-                                when (action) {
-                                    "hub" -> onOpenHub?.invoke() ?: onKeyListener?.invoke(KC.SETTINGS, "Settings")
-                                    "emoji" -> onKeyListener?.invoke(KC.EMOJI, "Emoji")
-                                    "voice" -> onOpenVoice?.invoke() ?: onKeyListener?.invoke(KC.MIC, "Voice")
-                                    "language" -> onKeyListener?.invoke(KC.LANGUAGE, "Language")
-                                    "clipboard" -> onOpenClipboard?.invoke() ?: onKeyListener?.invoke(KC.CLIPBOARD, "Clipboard")
-                                    "audio_wave", "mic" -> onOpenVoice?.invoke() ?: onOpenHub?.invoke()
-                                    "cursor" -> onOpenTextEditing?.invoke() ?: onKeyListener?.invoke(KC.SETTINGS, "Settings")
-                                    "hide" -> onHideKeyboard?.invoke()
-                                }
+                                onGlideListener?.invoke(sugg)
+                                handled = true
                                 break
+                            }
+                        }
+                        if (!handled) {
+                            val action = findToolbarAt(event.x, event.y) ?: downToolbar
+                            if (action != null) {
+                                dispatchToolbarAction(action)
                             }
                         }
                     }
                 }
                 isGliding = false
                 glideSamples.clear()
-                // Trail will fade naturally via alpha in onDraw
-                postInvalidateOnAnimation()
+                invalidate()
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                cancelPendingTimers()
+                pressedKey = null
+                pressedToolbarAction = null
+                deleteRepeatFired = false
+                longPressTriggered = false
+                isGliding = false
+                glideSamples.clear()
+                invalidate()
                 return true
             }
         }
         return super.onTouchEvent(event)
     }
 
-    private fun findKeyAt(x: Float, y: Float): Key? {
-        for ((key, rect) in keyBounds) {
-            if (rect.contains(x.toInt(), y.toInt())) {
-                return key
-            }
+    private fun findToolbarAt(x: Float, y: Float): String? {
+        val xi = x.toInt()
+        val yi = y.toInt()
+        for ((action, rect) in toolbarBounds) {
+            if (rect.contains(xi, yi)) return action
         }
         return null
     }
 
-    private fun sampleAt(x: Float, y: Float): GlideDecoder.Sample {
+    private fun findKeyAt(x: Float, y: Float): Key? {
+        val xi = x.toInt()
+        val yi = y.toInt()
         for ((key, rect) in keyBounds) {
-            if (rect.contains(x.toInt(), y.toInt())) {
-                // Use the actual label character, respecting shift state for letters
-                var char = key.label[0]
-                if (shiftActive && char.isLetter()) {
-                    char = char.uppercaseChar()
-                }
-                return GlideDecoder.Sample(char, x, y)
+            if (rect.contains(xi, yi)) {
+                return key
             }
         }
-        return GlideDecoder.Sample(' ', x, y)
+        // Fallback: if touch landed in the narrow padding gap between keys, snap to closest key
+        val density = resources.displayMetrics.density
+        val toolbarBottom = if (predictionEnabled) (keyHeightDp * density * 0.82f) + (8f * density) else 0f
+        if (y < toolbarBottom) return null
+        val maxGapDistSq = (12f * density) * (12f * density)
+        var bestKey: Key? = null
+        var bestDistSq = Float.MAX_VALUE
+        for ((key, rect) in keyBounds) {
+            val dx = when {
+                x < rect.left -> rect.left - x
+                x > rect.right -> x - rect.right
+                else -> 0f
+            }
+            val dy = when {
+                y < rect.top -> rect.top - y
+                y > rect.bottom -> y - rect.bottom
+                else -> 0f
+            }
+            val distSq = dx * dx + dy * dy
+            if (distSq <= maxGapDistSq && distSq < bestDistSq) {
+                bestDistSq = distSq
+                bestKey = key
+            }
+        }
+        return bestKey
+    }
+
+    private fun sampleForKey(key: Key, x: Float, y: Float): GlideDecoder.Sample {
+        var char = key.label.firstOrNull() ?: ' '
+        if (shiftActive && char.isLetter()) {
+            char = char.uppercaseChar()
+        }
+        return GlideDecoder.Sample(char, x, y)
+    }
+
+    private fun sampleAt(x: Float, y: Float): GlideDecoder.Sample {
+        val key = findKeyAt(x, y) ?: return GlideDecoder.Sample(' ', x, y)
+        return sampleForKey(key, x, y)
     }
 
     fun setOnKeyListener(listener: (Int, String) -> Unit) {
@@ -781,6 +962,7 @@ class KeyboardView(
     }
 
     fun setSuggestions(sugg: List<String>) {
+        if (suggestions.isEmpty() && sugg.isEmpty()) return
         suggestions = emptyList()
         invalidate()
     }
@@ -827,6 +1009,7 @@ class KeyboardView(
     }
 
     fun setShift(active: Boolean) {
+        if (shiftActive == active) return
         shiftActive = active
         invalidate()
     }
@@ -890,10 +1073,17 @@ class KeyboardView(
                 customRadius, customRadius,
                 keyBgPaint
             )
+            if (pressedKey == key) {
+                canvas.drawRoundRect(
+                    left + keyPadding, top + keyPadding, right - keyPadding, bottom - keyPadding,
+                    customRadius, customRadius,
+                    keyPressedBgPaint
+                )
+            }
             canvas.drawRoundRect(
                 left + keyPadding, top + keyPadding, right - keyPadding, bottom - keyPadding,
                 customRadius, customRadius,
-                keyBorderPaint
+                if (pressedKey == key) shiftHighlightPaint else keyBorderPaint
             )
 
             val centerX = (left + right) / 2f

@@ -16,7 +16,11 @@ class MultilingualPredictor(private val ctx: Context) {
         val predictor: Predictor
     )
 
-    private val entries: MutableMap<String, Entry> = mutableMapOf()
+    private val entries: MutableMap<String, Entry> = java.util.concurrent.ConcurrentHashMap()
+
+    fun preloadAll() {
+        KeyboardLanguages.all.forEach { entryFor(it.code) }
+    }
 
     fun suggest(lang: String, prefix: String, previousWord: String?, limit: Int = 3): List<String> {
         return entryFor(lang).predictor.suggest(prefix, previousWord, limit)
@@ -36,10 +40,13 @@ class MultilingualPredictor(private val ctx: Context) {
 
     private fun entryFor(lang: String): Entry {
         val language = KeyboardLanguages.byCode(lang)
-        return entries.getOrPut(language.code) {
-            val wordList = WordList(ctx, language.wordListRes)
-            val userDict = UserDictionary(ctx, language.code)
-            Entry(wordList, userDict, Predictor(wordList, userDict))
+        entries[language.code]?.let { return it }
+        return synchronized(entries) {
+            entries.getOrPut(language.code) {
+                val wordList = WordList(ctx, language.wordListRes)
+                val userDict = UserDictionary(ctx, language.code)
+                Entry(wordList, userDict, Predictor(wordList, userDict))
+            }
         }
     }
 }

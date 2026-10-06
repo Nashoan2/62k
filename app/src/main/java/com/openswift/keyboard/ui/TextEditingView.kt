@@ -132,6 +132,11 @@ class TextEditingView @JvmOverloads constructor(
     // Hit test regions
     private val toolbarBounds = mutableMapOf<String, RectF>()
     private val keyBounds = mutableMapOf<Action, RectF>()
+    private var pressedAction: Action? = null
+    private var pressedToolbarId: String? = null
+    private var repeatFiredOnDown = false
+    private val repeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var repeatRunnable: Runnable? = null
 
     // Dimensions
     private val toolbarHeight = 44f * density
@@ -250,7 +255,8 @@ class TextEditingView @JvmOverloads constructor(
 
                 // Background
                 val isSelectionActive = (item.action == Action.SELECT_TOGGLE && isSelectionModeActive)
-                val paintToUse = if (isSelectionActive) keyActiveBgPaint else keyBgPaint
+                val isPressed = (pressedAction == item.action)
+                val paintToUse = if (isSelectionActive || isPressed) keyActiveBgPaint else keyBgPaint
                 canvas.drawRoundRect(rect, keyCornerRadius, keyCornerRadius, paintToUse)
 
                 // Content
@@ -302,12 +308,74 @@ class TextEditingView @JvmOverloads constructor(
         val icon: android.graphics.drawable.Drawable? = null
     )
 
+    private fun isRepeatableAction(action: Action): Boolean =
+        action == Action.UP ||
+            action == Action.DOWN ||
+            action == Action.LEFT ||
+            action == Action.RIGHT ||
+            action == Action.DELETE ||
+            action == Action.SPACE
+
+    private fun cancelRepeat() {
+        repeatRunnable?.let { repeatHandler.removeCallbacks(it) }
+        repeatRunnable = null
+    }
+
+    private fun findKeyActionAt(x: Float, y: Float): Action? {
+        for ((action, rect) in keyBounds) {
+            if (rect.contains(x, y)) return action
+        }
+        return null
+    }
+
+    private fun findToolbarIdAt(x: Float, y: Float): String? {
+        for ((id, rect) in toolbarBounds) {
+            if (rect.contains(x, y)) return id
+        }
+        return null
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action == MotionEvent.ACTION_UP) {
-            // Check Toolbar clicks
-            for ((id, rect) in toolbarBounds) {
-                if (rect.contains(event.x, event.y)) {
-                    when (id) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                cancelRepeat()
+                repeatFiredOnDown = false
+                val action = findKeyActionAt(event.x, event.y)
+                pressedAction = action
+                pressedToolbarId = if (action == null) findToolbarIdAt(event.x, event.y) else null
+                invalidate()
+
+                if (action != null && isRepeatableAction(action)) {
+                    repeatFiredOnDown = true
+                    onAction?.invoke(action)
+                    val task = object : Runnable {
+                        override fun run() {
+                            if (pressedAction == action) {
+                                onAction?.invoke(action)
+                                repeatHandler.postDelayed(this, 55L)
+                            }
+                        }
+                    }
+                    repeatRunnable = task
+                    repeatHandler.postDelayed(task, 300L)
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val downAction = pressedAction
+                val downToolbar = pressedToolbarId
+                val wasRepeated = repeatFiredOnDown
+                cancelRepeat()
+                pressedAction = null
+                pressedToolbarId = null
+                repeatFiredOnDown = false
+                invalidate()
+
+                if (wasRepeated) return true
+
+                val toolbarId = findToolbarIdAt(event.x, event.y) ?: downToolbar
+                if (toolbarId != null) {
+                    when (toolbarId) {
                         "hub" -> onOpenHub?.invoke()
                         "emoji" -> onOpenEmoji?.invoke()
                         "clipboard" -> onOpenClipboard?.invoke()
@@ -315,11 +383,9 @@ class TextEditingView @JvmOverloads constructor(
                     }
                     return true
                 }
-            }
 
-            // Check Keypad clicks
-            for ((action, rect) in keyBounds) {
-                if (rect.contains(event.x, event.y)) {
+                val action = findKeyActionAt(event.x, event.y) ?: downAction
+                if (action != null) {
                     if (action == Action.CLIPBOARD) {
                         onOpenClipboard?.invoke()
                     } else {
@@ -327,6 +393,15 @@ class TextEditingView @JvmOverloads constructor(
                     }
                     return true
                 }
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                cancelRepeat()
+                pressedAction = null
+                pressedToolbarId = null
+                repeatFiredOnDown = false
+                invalidate()
+                return true
             }
         }
         return true

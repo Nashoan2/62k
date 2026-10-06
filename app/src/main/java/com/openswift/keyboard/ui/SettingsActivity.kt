@@ -31,9 +31,9 @@ class SettingsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val settings = Settings(this@SettingsActivity)
-            val themeEditor = ThemeEditor(this@SettingsActivity)
-            val snippets = SnippetManager(this@SettingsActivity)
+            val settings = remember { Settings(this@SettingsActivity) }
+            val themeEditor = remember { ThemeEditor(this@SettingsActivity) }
+            val snippets = remember { SnippetManager(this@SettingsActivity) }
             SettingsUI(settings, themeEditor, snippets)
         }
     }
